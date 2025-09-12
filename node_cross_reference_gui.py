@@ -472,7 +472,7 @@ class NodeCrossReferenceGUI:
         self.summary_text.insert(1.0, "\n".join(summary))
     
     def export_results(self):
-        """Export results to CSV files"""
+        """Export results to CSV files and Excel workbook"""
         
         if not self.results:
             messagebox.showwarning("Warning", "No results to export")
@@ -487,15 +487,26 @@ class NodeCrossReferenceGUI:
             if any(r.status == "can_close" for r in self.results):
                 files_created.append("results_can_close.csv")
             if any(r.status == "needs_review" for r in self.results):
-                files_created.append("results_need_review.csv")
+                files_created.append("results_need_review.csv")  
             if any(r.status == "error" for r in self.results):
                 files_created.append("results_errors.csv")
             files_created.append("summary_report.txt")
             
+            # Check for Excel file (if openpyxl is available)
+            excel_files = [f for f in os.listdir('.') if f.startswith('node_cross_reference_results_') and f.endswith('.xlsx')]
+            if excel_files:
+                # Get the most recent Excel file
+                excel_file = max(excel_files, key=lambda f: os.path.getctime(f))
+                files_created.insert(0, f"📊 {excel_file} (Excel with multiple sheets)")
+            
             message = "Results exported successfully!\n\nFiles created:\n" + "\n".join(f"• {f}" for f in files_created)
+            
+            if excel_files:
+                message += "\n\n📊 Excel file includes:\n• Can Close sheet (color-coded)\n• Need Review sheet (critical issues highlighted)\n• Summary sheet with statistics\n• Auto-sized columns"
+                
             messagebox.showinfo("Export Complete", message)
             
-            self.status_var.set(f"Exported {len(files_created)} result files")
+            self.status_var.set(f"Exported {len(files_created)} result files including Excel workbook")
             
         except Exception as e:
             messagebox.showerror("Export Error", f"Failed to export results: {str(e)}")
