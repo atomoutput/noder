@@ -1,4 +1,19 @@
-*.csv
-*.txt
+# Python cache
 __pycache__/
+*.pyc
+*.pyo
+
+# Lock files
 .~lock.*
+
+# Results directory - generated files
+results/
+
+# Data files (except test data)
+nodes_report.txt
+nodes_tickets.csv
+
+# Keep test data and main scripts
+!data/nodes_tickets_test.csv
+!node_cross_reference.py
+!node_cross_reference_gui.py

@@ -44,8 +44,14 @@ class Ticket:
     priority: str
     created: str
     updated: str
+    resolved: Optional[str] = None
     store_number: Optional[int] = None
     node_number: Optional[int] = None
+    
+    @property
+    def is_closed(self) -> bool:
+        """Check if ticket is closed based on resolved field"""
+        return self.resolved is not None and self.resolved.strip() != ""
 
 
 @dataclass
@@ -61,7 +67,7 @@ class OfflineNode:
 class AnalysisResult:
     """Result of analyzing a ticket"""
     ticket: Ticket
-    status: str  # "can_close", "needs_review", "error"
+    status: str  # "can_close", "needs_review", "suggest_reopen", "closed_ok", "error"
     reason: str
     store_in_report: bool = False
     node_in_report: bool = False
@@ -197,64 +203,109 @@ class NodeCrossReference:
         return "medium"
     
     def load_tickets(self, csv_file: str):
-        """Load tickets from CSV file"""
-        with open(csv_file, 'r', encoding='utf-8') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                ticket = Ticket(
-                    site=row['Site'],
-                    number=row['Number'],
-                    description=row['Short description'],
-                    priority=row['Priority'],
-                    created=row['Created'],
-                    updated=row['Updated']
-                )
+        """Load tickets from CSV file with dynamic column detection"""
+        try:
+            with open(csv_file, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
                 
-                # Extract store and node numbers
-                ticket.store_number = self.extract_store_number(ticket.site)
-                ticket.node_number = self.extract_node_number(ticket.description)
+                # Validate required columns
+                required_columns = ['Site', 'Number', 'Short description', 'Priority', 'Created', 'Updated']
+                missing_columns = [col for col in required_columns if col not in reader.fieldnames]
+                if missing_columns:
+                    raise ValueError(f"Missing required columns in CSV: {', '.join(missing_columns)}")
                 
-                # Track stores that have tickets
-                if ticket.store_number:
-                    self.stores_with_tickets.add(ticket.store_number)
+                # Check if Resolved column exists
+                has_resolved = 'Resolved' in reader.fieldnames
+                if has_resolved:
+                    print(f"Found 'Resolved' column - will analyze both open and closed tickets")
+                else:
+                    print(f"No 'Resolved' column found - treating all tickets as open")
                 
-                self.tickets.append(ticket)
+                for row in reader:
+                    try:
+                        ticket = Ticket(
+                            site=row['Site'],
+                            number=row['Number'],
+                            description=row['Short description'],
+                            priority=row['Priority'],
+                            created=row['Created'],
+                            updated=row['Updated'],
+                            resolved=row.get('Resolved', '') if has_resolved else None
+                        )
+                        
+                        # Extract store and node numbers
+                        ticket.store_number = self.extract_store_number(ticket.site)
+                        ticket.node_number = self.extract_node_number(ticket.description)
+                        
+                        # Track stores that have tickets
+                        if ticket.store_number:
+                            self.stores_with_tickets.add(ticket.store_number)
+                        
+                        self.tickets.append(ticket)
+                        
+                    except Exception as e:
+                        print(f"Warning: Failed to parse ticket row {row.get('Number', 'unknown')}: {e}")
+                        continue
         
-        print(f"Loaded {len(self.tickets)} tickets from {csv_file}")
+        except FileNotFoundError:
+            raise FileNotFoundError(f"CSV file '{csv_file}' not found")
+        except Exception as e:
+            raise Exception(f"Error loading CSV file '{csv_file}': {e}")
+        
+        open_tickets = len([t for t in self.tickets if not t.is_closed])
+        closed_tickets = len([t for t in self.tickets if t.is_closed])
+        print(f"Loaded {len(self.tickets)} tickets from {csv_file} ({open_tickets} open, {closed_tickets} closed)")
     
     def load_offline_nodes(self, report_file: str):
         """Load offline nodes from the report file"""
-        with open(report_file, 'r', encoding='utf-8') as f:
-            content = f.read()
+        try:
+            with open(report_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            if not content.strip():
+                raise ValueError("Report file is empty")
+            
+            # Track critical stores
+            self.saf_stores = set()  # Stores with SAF markers
+            self.both_nodes_offline_stores = set()  # Stores with both nodes offline
+            
+            # Parse store sections
+            store_sections = re.split(r'^Store #(\d+)', content, flags=re.MULTILINE)
+            
+            if len(store_sections) < 2:
+                raise ValueError("No store sections found in report file. Expected format: 'Store #<number>'")
+            
+            for i in range(1, len(store_sections), 2):
+                try:
+                    store_number = int(store_sections[i])
+                    section_content = store_sections[i + 1]
+                    
+                    # Check for SAF marker
+                    if '!!! SAF !!!' in section_content:
+                        self.saf_stores.add(store_number)
+                    
+                    # Find all nodes in this section
+                    node_matches = re.findall(r'esp\d+-l0([12])', section_content)
+                    
+                    if store_number not in self.offline_nodes:
+                        self.offline_nodes[store_number] = set()
+                    
+                    for node_match in node_matches:
+                        node_number = int(node_match)
+                        self.offline_nodes[store_number].add(node_number)
+                    
+                    # Check if both nodes are offline
+                    if len(self.offline_nodes[store_number]) >= 2:
+                        self.both_nodes_offline_stores.add(store_number)
+                        
+                except ValueError as e:
+                    print(f"Warning: Failed to parse store section: {e}")
+                    continue
         
-        # Track critical stores
-        self.saf_stores = set()  # Stores with SAF markers
-        self.both_nodes_offline_stores = set()  # Stores with both nodes offline
-        
-        # Parse store sections
-        store_sections = re.split(r'^Store #(\d+)', content, flags=re.MULTILINE)
-        
-        for i in range(1, len(store_sections), 2):
-            store_number = int(store_sections[i])
-            section_content = store_sections[i + 1]
-            
-            # Check for SAF marker
-            if '!!! SAF !!!' in section_content:
-                self.saf_stores.add(store_number)
-            
-            # Find all nodes in this section
-            node_matches = re.findall(r'esp\d+-l0([12])', section_content)
-            
-            if store_number not in self.offline_nodes:
-                self.offline_nodes[store_number] = set()
-            
-            for node_match in node_matches:
-                node_number = int(node_match)
-                self.offline_nodes[store_number].add(node_number)
-            
-            # Check if both nodes are offline
-            if len(self.offline_nodes[store_number]) >= 2:
-                self.both_nodes_offline_stores.add(store_number)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Report file '{report_file}' not found")
+        except Exception as e:
+            raise Exception(f"Error loading report file '{report_file}': {e}")
         
         total_stores = len(self.offline_nodes)
         total_nodes = sum(len(nodes) for nodes in self.offline_nodes.values())
@@ -359,9 +410,8 @@ class NodeCrossReference:
                 business_logic_flag="critical_both_nodes_offline"
             )
         
-        # If business logic flag is present, always needs review
+        # If business logic flag is present, handle based on type and node status
         if has_business_flag:
-            confidence = self.determine_confidence(ticket, store_in_report, False, business_flag)
             flag_descriptions = {
                 "do_not_close": "Ticket contains 'do not close' instructions",
                 "workflow_status": "Ticket has workflow status indicators", 
@@ -370,7 +420,47 @@ class NodeCrossReference:
                 "critical_both_nodes_offline": "CRITICAL: Store has both nodes offline"
             }
             
-            # Build detailed reason with store/node status
+            # SPECIAL CASE: Workflow status tickets can be closed if nodes are back online
+            if business_flag == "workflow_status":
+                # GREEN ZONE: If store is not in report at all, definitely close the ticket
+                if not store_in_report:
+                    confidence = self.determine_confidence(ticket, False, False, "")
+                    return AnalysisResult(
+                        ticket=ticket,
+                        status="can_close",
+                        reason="Workflow status ticket - store not in offline report, all nodes confirmed online",
+                        store_in_report=False,
+                        node_in_report=False,
+                        confidence=confidence,
+                        business_logic_flag=business_flag
+                    )
+                
+                # Store is in report, check if specific node is actually offline
+                offline_nodes_for_store = self.offline_nodes[ticket.store_number]
+                if ticket.node_number is None:
+                    # Can't identify specific node, but store has some offline nodes - needs review
+                    node_actually_offline = True
+                else:
+                    # Check if the specific node mentioned in the ticket is offline
+                    node_actually_offline = ticket.node_number in offline_nodes_for_store
+                
+                if not node_actually_offline:
+                    # Specific node is back online, workflow status ticket can be closed
+                    confidence = self.determine_confidence(ticket, store_in_report, False, "")
+                    status_detail = f"Node {ticket.node_number} is back online (other offline nodes: {sorted(offline_nodes_for_store)})"
+                    
+                    return AnalysisResult(
+                        ticket=ticket,
+                        status="can_close",
+                        reason=f"Workflow status ticket - node is back online. Status: {status_detail}",
+                        store_in_report=store_in_report,
+                        node_in_report=False,
+                        confidence=confidence,
+                        business_logic_flag=business_flag
+                    )
+            
+            # All other business logic flags or workflow status with nodes still offline - needs review
+            confidence = self.determine_confidence(ticket, store_in_report, False, business_flag)
             base_reason = flag_descriptions.get(business_flag, 'Business logic flag detected')
             
             if not store_in_report:
@@ -454,17 +544,127 @@ class NodeCrossReference:
                 business_logic_flag=business_flag
             )
     
+    def analyze_closed_ticket(self, ticket: Ticket) -> AnalysisResult:
+        """Analyze a closed ticket to determine if it should be reopened"""
+        
+        # Check if we could extract store number
+        if ticket.store_number is None:
+            return AnalysisResult(
+                ticket=ticket,
+                status="error",
+                reason="Could not extract store number from site field",
+                store_in_report=False,
+                node_in_report=False,
+                confidence="low",
+                business_logic_flag=""
+            )
+        
+        # Check if store is in the offline report
+        store_in_report = ticket.store_number in self.offline_nodes
+        
+        if not store_in_report:
+            # Store not in report means no nodes are offline - ticket should stay closed
+            return AnalysisResult(
+                ticket=ticket,
+                status="closed_ok",
+                reason="Store not in offline report - all nodes are online, ticket correctly closed",
+                store_in_report=False,
+                node_in_report=False,
+                confidence="high",
+                business_logic_flag=""
+            )
+        
+        # Store has offline nodes - check if this ticket should be reopened
+        offline_nodes_for_store = self.offline_nodes[ticket.store_number]
+        
+        # Check for CRITICAL conditions first
+        is_saf_store = ticket.store_number in self.saf_stores
+        is_both_nodes_offline = ticket.store_number in self.both_nodes_offline_stores
+        
+        if is_saf_store:
+            return AnalysisResult(
+                ticket=ticket,
+                status="suggest_reopen",
+                reason=f"CRITICAL: Store has SAF (Store and Forward) failure - ticket should be REOPENED IMMEDIATELY. Offline nodes: {sorted(offline_nodes_for_store)}",
+                store_in_report=True,
+                node_in_report=True,
+                confidence="high",
+                business_logic_flag="critical_saf"
+            )
+        
+        if is_both_nodes_offline:
+            return AnalysisResult(
+                ticket=ticket,
+                status="suggest_reopen",
+                reason=f"CRITICAL: Store has BOTH nodes offline - ticket should be REOPENED IMMEDIATELY. Offline nodes: {sorted(offline_nodes_for_store)}",
+                store_in_report=True,
+                node_in_report=True,
+                confidence="high",
+                business_logic_flag="critical_both_nodes_offline"
+            )
+        
+        # Check specific node if we can identify it
+        if ticket.node_number is None:
+            # Can't determine specific node, but store has offline nodes - suggest review
+            return AnalysisResult(
+                ticket=ticket,
+                status="suggest_reopen",
+                reason=f"Store has offline nodes but couldn't identify specific node from ticket description. Offline nodes: {sorted(offline_nodes_for_store)} - SUGGEST REVIEW FOR REOPEN",
+                store_in_report=True,
+                node_in_report=False,
+                confidence="medium",
+                business_logic_flag=""
+            )
+        
+        # Check if the specific node mentioned in the ticket is offline
+        node_in_report = ticket.node_number in offline_nodes_for_store
+        
+        if node_in_report:
+            # The specific node is offline - ticket should be reopened
+            return AnalysisResult(
+                ticket=ticket,
+                status="suggest_reopen",
+                reason=f"Node {ticket.node_number} is confirmed offline - ticket should be REOPENED",
+                store_in_report=True,
+                node_in_report=True,
+                confidence="high",
+                business_logic_flag=""
+            )
+        else:
+            # The specific node is online, but other nodes are offline - ticket stays closed
+            return AnalysisResult(
+                ticket=ticket,
+                status="closed_ok",
+                reason=f"Node {ticket.node_number} is online (correctly closed). Other offline nodes in store: {sorted(offline_nodes_for_store)}",
+                store_in_report=True,
+                node_in_report=False,
+                confidence="high",
+                business_logic_flag=""
+            )
+    
     def analyze_all_tickets(self):
-        """Analyze all tickets"""
+        """Analyze all tickets (both open and closed)"""
         print("Analyzing tickets...")
         
-        for ticket in self.tickets:
+        open_tickets = [t for t in self.tickets if not t.is_closed]
+        closed_tickets = [t for t in self.tickets if t.is_closed]
+        
+        print(f"  Processing {len(open_tickets)} open tickets...")
+        for ticket in open_tickets:
             result = self.analyze_ticket(ticket)
             self.results.append(result)
+        
+        if closed_tickets:
+            print(f"  Processing {len(closed_tickets)} closed tickets...")
+            for ticket in closed_tickets:
+                result = self.analyze_closed_ticket(ticket)
+                self.results.append(result)
         
         # Print summary
         can_close = len([r for r in self.results if r.status == "can_close"])
         needs_review = len([r for r in self.results if r.status == "needs_review"])
+        suggest_reopen = len([r for r in self.results if r.status == "suggest_reopen"])
+        closed_ok = len([r for r in self.results if r.status == "closed_ok"])
         errors = len([r for r in self.results if r.status == "error"])
         
         # Check for missing tickets
@@ -473,6 +673,8 @@ class NodeCrossReference:
         print(f"Analysis complete:")
         print(f"  Can close: {can_close}")
         print(f"  Need review: {needs_review}")
+        print(f"  Suggest reopen: {suggest_reopen}")
+        print(f"  Closed OK: {closed_ok}")
         print(f"  Errors: {errors}")
         print(f"  Missing tickets: {len(missing_tickets)} (stores with offline nodes but no tickets)")
     
@@ -486,7 +688,7 @@ class NodeCrossReference:
                 writer = csv.writer(f)
                 writer.writerow([
                     'Ticket_Number', 'Site', 'Description', 'Priority', 
-                    'Created', 'Updated', 'Store_Number', 'Node_Number', 'Confidence', 
+                    'Created', 'Updated', 'Resolved', 'Ticket_Status', 'Store_Number', 'Node_Number', 'Confidence', 
                     'Business_Flag', 'Reason'
                 ])
                 
@@ -494,7 +696,7 @@ class NodeCrossReference:
                     t = result.ticket
                     writer.writerow([
                         t.number, t.site, t.description, t.priority,
-                        t.created, t.updated, t.store_number, t.node_number,
+                        t.created, t.updated, t.resolved or '', 'OPEN' if not t.is_closed else 'CLOSED', t.store_number, t.node_number,
                         result.confidence, result.business_logic_flag, result.reason
                     ])
             print(f"Exported {len(can_close_tickets)} closable tickets to results_can_close.csv")
@@ -506,7 +708,7 @@ class NodeCrossReference:
                 writer = csv.writer(f)
                 writer.writerow([
                     'Ticket_Number', 'Site', 'Description', 'Priority',
-                    'Created', 'Updated', 'Store_Number', 'Node_Number', 'Confidence',
+                    'Created', 'Updated', 'Resolved', 'Ticket_Status', 'Store_Number', 'Node_Number', 'Confidence',
                     'Business_Flag', 'Reason'
                 ])
                 
@@ -514,10 +716,50 @@ class NodeCrossReference:
                     t = result.ticket
                     writer.writerow([
                         t.number, t.site, t.description, t.priority,
-                        t.created, t.updated, t.store_number, t.node_number,
+                        t.created, t.updated, t.resolved or '', 'OPEN' if not t.is_closed else 'CLOSED', t.store_number, t.node_number,
                         result.confidence, result.business_logic_flag, result.reason
                     ])
             print(f"Exported {len(needs_review_tickets)} tickets needing review to results_need_review.csv")
+        
+        # Export tickets that suggest reopening
+        suggest_reopen_tickets = [r for r in self.results if r.status == "suggest_reopen"]
+        if suggest_reopen_tickets:
+            with open('results_suggest_reopen.csv', 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    'Ticket_Number', 'Site', 'Description', 'Priority',
+                    'Created', 'Updated', 'Resolved', 'Store_Number', 'Node_Number', 'Confidence',
+                    'Business_Flag', 'Reason'
+                ])
+                
+                for result in suggest_reopen_tickets:
+                    t = result.ticket
+                    writer.writerow([
+                        t.number, t.site, t.description, t.priority,
+                        t.created, t.updated, t.resolved or '', t.store_number, t.node_number,
+                        result.confidence, result.business_logic_flag, result.reason
+                    ])
+            print(f"Exported {len(suggest_reopen_tickets)} closed tickets suggesting reopen to results_suggest_reopen.csv")
+        
+        # Export tickets that are correctly closed
+        closed_ok_tickets = [r for r in self.results if r.status == "closed_ok"]
+        if closed_ok_tickets:
+            with open('results_closed_ok.csv', 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    'Ticket_Number', 'Site', 'Description', 'Priority',
+                    'Created', 'Updated', 'Resolved', 'Store_Number', 'Node_Number', 'Confidence',
+                    'Business_Flag', 'Reason'
+                ])
+                
+                for result in closed_ok_tickets:
+                    t = result.ticket
+                    writer.writerow([
+                        t.number, t.site, t.description, t.priority,
+                        t.created, t.updated, t.resolved or '', t.store_number, t.node_number,
+                        result.confidence, result.business_logic_flag, result.reason
+                    ])
+            print(f"Exported {len(closed_ok_tickets)} correctly closed tickets to results_closed_ok.csv")
         
         # Export errors if any
         error_tickets = [r for r in self.results if r.status == "error"]
@@ -540,14 +782,14 @@ class NodeCrossReference:
         # Export to Excel if available
         if EXCEL_AVAILABLE:
             missing_tickets = self.get_missing_tickets()
-            self.export_to_excel(can_close_tickets, needs_review_tickets, error_tickets, missing_tickets)
+            self.export_to_excel(can_close_tickets, needs_review_tickets, suggest_reopen_tickets, closed_ok_tickets, error_tickets, missing_tickets)
         else:
             print("Excel export unavailable - openpyxl not installed. Run: pip install openpyxl")
         
         # Create summary report
         self.create_summary_report()
     
-    def export_to_excel(self, can_close_tickets, needs_review_tickets, error_tickets, missing_tickets):
+    def export_to_excel(self, can_close_tickets, needs_review_tickets, suggest_reopen_tickets, closed_ok_tickets, error_tickets, missing_tickets):
         """Export results to Excel workbook with multiple sheets"""
         try:
             wb = Workbook()
@@ -564,7 +806,7 @@ class NodeCrossReference:
             
             headers = [
                 'Ticket_Number', 'Site', 'Description', 'Priority', 
-                'Created', 'Updated', 'Store_Number', 'Node_Number', 'Confidence', 
+                'Created', 'Updated', 'Resolved', 'Ticket_Status', 'Store_Number', 'Node_Number', 'Confidence', 
                 'Business_Flag', 'Reason'
             ]
             
@@ -585,7 +827,7 @@ class NodeCrossReference:
                     t = result.ticket
                     row = [
                         t.number, t.site, t.description, t.priority,
-                        t.created, t.updated, t.store_number, t.node_number,
+                        t.created, t.updated, t.resolved or '', 'OPEN' if not t.is_closed else 'CLOSED', t.store_number, t.node_number,
                         result.confidence, result.business_logic_flag, result.reason
                     ]
                     ws_close.append(row)
@@ -626,7 +868,7 @@ class NodeCrossReference:
                     t = result.ticket
                     row = [
                         t.number, t.site, t.description, t.priority,
-                        t.created, t.updated, t.store_number, t.node_number,
+                        t.created, t.updated, t.resolved or '', 'OPEN' if not t.is_closed else 'CLOSED', t.store_number, t.node_number,
                         result.confidence, result.business_logic_flag, result.reason
                     ]
                     ws_review.append(row)
@@ -654,7 +896,103 @@ class NodeCrossReference:
                     adjusted_width = min(max_length + 2, 50)
                     ws_review.column_dimensions[column_letter].width = adjusted_width
             
-            # Sheet 3: Errors (if any)
+            # Sheet 3: Suggest Reopen
+            if suggest_reopen_tickets:
+                ws_reopen = wb.create_sheet("Suggest Reopen")
+                reopen_headers = [
+                    'Ticket_Number', 'Site', 'Description', 'Priority', 
+                    'Created', 'Updated', 'Resolved', 'Store_Number', 'Node_Number', 'Confidence', 
+                    'Business_Flag', 'Reason'
+                ]
+                ws_reopen.append(reopen_headers)
+                
+                # Style header row
+                for col_num, header in enumerate(reopen_headers, 1):
+                    cell = ws_reopen.cell(row=1, column=col_num)
+                    cell.font = header_font
+                    cell.fill = header_fill
+                    cell.alignment = Alignment(horizontal="center")
+                
+                # Add data rows
+                for result in suggest_reopen_tickets:
+                    t = result.ticket
+                    row = [
+                        t.number, t.site, t.description, t.priority,
+                        t.created, t.updated, t.resolved or '', t.store_number, t.node_number,
+                        result.confidence, result.business_logic_flag, result.reason
+                    ]
+                    ws_reopen.append(row)
+                    
+                    # Highlight critical rows
+                    row_num = ws_reopen.max_row
+                    if result.business_logic_flag in ["critical_saf", "critical_both_nodes_offline"]:
+                        for col_num in range(1, len(reopen_headers) + 1):
+                            ws_reopen.cell(row=row_num, column=col_num).fill = critical_fill
+                            ws_reopen.cell(row=row_num, column=col_num).font = Font(color="FFFFFF", bold=True)
+                    elif result.confidence == "high":
+                        for col_num in range(1, len(reopen_headers) + 1):
+                            ws_reopen.cell(row=row_num, column=col_num).fill = high_fill
+                
+                # Auto-adjust column widths
+                for column in ws_reopen.columns:
+                    max_length = 0
+                    column_letter = column[0].column_letter
+                    for cell in column:
+                        try:
+                            if len(str(cell.value)) > max_length:
+                                max_length = len(str(cell.value))
+                        except:
+                            pass
+                    adjusted_width = min(max_length + 2, 50)
+                    ws_reopen.column_dimensions[column_letter].width = adjusted_width
+            
+            # Sheet 4: Closed OK
+            if closed_ok_tickets:
+                ws_closed_ok = wb.create_sheet("Closed OK")
+                closed_ok_headers = [
+                    'Ticket_Number', 'Site', 'Description', 'Priority', 
+                    'Created', 'Updated', 'Resolved', 'Store_Number', 'Node_Number', 'Confidence', 
+                    'Business_Flag', 'Reason'
+                ]
+                ws_closed_ok.append(closed_ok_headers)
+                
+                # Style header row
+                for col_num, header in enumerate(closed_ok_headers, 1):
+                    cell = ws_closed_ok.cell(row=1, column=col_num)
+                    cell.font = header_font
+                    cell.fill = header_fill
+                    cell.alignment = Alignment(horizontal="center")
+                
+                # Add data rows
+                for result in closed_ok_tickets:
+                    t = result.ticket
+                    row = [
+                        t.number, t.site, t.description, t.priority,
+                        t.created, t.updated, t.resolved or '', t.store_number, t.node_number,
+                        result.confidence, result.business_logic_flag, result.reason
+                    ]
+                    ws_closed_ok.append(row)
+                    
+                    # Highlight high confidence rows with light green
+                    if result.confidence == "high":
+                        row_num = ws_closed_ok.max_row
+                        for col_num in range(1, len(closed_ok_headers) + 1):
+                            ws_closed_ok.cell(row=row_num, column=col_num).fill = can_close_fill
+                
+                # Auto-adjust column widths
+                for column in ws_closed_ok.columns:
+                    max_length = 0
+                    column_letter = column[0].column_letter
+                    for cell in column:
+                        try:
+                            if len(str(cell.value)) > max_length:
+                                max_length = len(str(cell.value))
+                        except:
+                            pass
+                    adjusted_width = min(max_length + 2, 50)
+                    ws_closed_ok.column_dimensions[column_letter].width = adjusted_width
+            
+            # Sheet 5: Errors (if any)
             if error_tickets:
                 ws_errors = wb.create_sheet("Errors")
                 error_headers = [
@@ -808,7 +1146,9 @@ class NodeCrossReference:
             
             print(f"Excel report exported to: {filename}")
             print(f"  - {'Can Close' if can_close_tickets else 'No Can Close'} sheet: {len(can_close_tickets)} tickets")
-            print(f"  - {'Need Review' if needs_review_tickets else 'No Need Review'} sheet: {len(needs_review_tickets)} tickets") 
+            print(f"  - {'Need Review' if needs_review_tickets else 'No Need Review'} sheet: {len(needs_review_tickets)} tickets")
+            print(f"  - {'Suggest Reopen' if suggest_reopen_tickets else 'No Suggest Reopen'} sheet: {len(suggest_reopen_tickets)} tickets")
+            print(f"  - {'Closed OK' if closed_ok_tickets else 'No Closed OK'} sheet: {len(closed_ok_tickets)} tickets") 
             print(f"  - {'Errors' if error_tickets else 'No Errors'} sheet: {len(error_tickets)} tickets")
             print(f"  - {'Missing Tickets' if missing_tickets else 'No Missing Tickets'} sheet: {len(missing_tickets)} tickets needed")
             print(f"  - Summary sheet with critical conditions overview")
@@ -827,6 +1167,8 @@ class NodeCrossReference:
             total_tickets = len(self.results)
             can_close = len([r for r in self.results if r.status == "can_close"])
             needs_review = len([r for r in self.results if r.status == "needs_review"])
+            suggest_reopen = len([r for r in self.results if r.status == "suggest_reopen"])
+            closed_ok = len([r for r in self.results if r.status == "closed_ok"])
             errors = len([r for r in self.results if r.status == "error"])
             
             # Confidence breakdown
@@ -841,6 +1183,8 @@ class NodeCrossReference:
             f.write(f"Total tickets analyzed: {total_tickets}\n")
             f.write(f"Can close: {can_close} ({can_close/total_tickets*100:.1f}%)\n")
             f.write(f"Need review: {needs_review} ({needs_review/total_tickets*100:.1f}%)\n")
+            f.write(f"Suggest reopen: {suggest_reopen} ({suggest_reopen/total_tickets*100:.1f}%)\n")
+            f.write(f"Closed OK: {closed_ok} ({closed_ok/total_tickets*100:.1f}%)\n")
             f.write(f"Errors: {errors} ({errors/total_tickets*100:.1f}%)\n\n")
             
             f.write("CONFIDENCE BREAKDOWN:\n")
@@ -892,9 +1236,15 @@ class NodeCrossReference:
                 f.write("  - results_can_close.csv: Tickets that can be definitively closed\n")
             if needs_review > 0:
                 f.write("  - results_need_review.csv: Tickets requiring manual review\n")
+            if suggest_reopen > 0:
+                f.write("  - results_suggest_reopen.csv: Closed tickets that should be reopened\n")
+            if closed_ok > 0:
+                f.write("  - results_closed_ok.csv: Closed tickets that should stay closed\n")
             if errors > 0:
                 f.write("  - results_errors.csv: Tickets with parsing errors\n")
             f.write("  - summary_report.txt: This summary report\n")
+            if EXCEL_AVAILABLE:
+                f.write("  - Excel workbook with all categories and summary\n")
         
         print("Summary report created: summary_report.txt")
 

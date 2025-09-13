@@ -133,6 +133,12 @@ class NodeCrossReferenceGUI:
         # Need Review tab
         self.setup_need_review_tab()
         
+        # Suggest Reopen tab
+        self.setup_suggest_reopen_tab()
+        
+        # Closed OK tab
+        self.setup_closed_ok_tab()
+        
         # Errors tab
         self.setup_errors_tab()
     
@@ -200,6 +206,62 @@ class NodeCrossReferenceGUI:
         
         review_frame.columnconfigure(0, weight=1)
         review_frame.rowconfigure(0, weight=1)
+    
+    def setup_suggest_reopen_tab(self):
+        """Setup suggest reopen tickets tab"""
+        
+        reopen_frame = ttk.Frame(self.notebook, padding="10")
+        self.notebook.add(reopen_frame, text="Suggest Reopen (0)")
+        
+        # Treeview for suggest reopen tickets
+        columns = ('Ticket', 'Store', 'Node', 'Resolved', 'Confidence', 'Flag', 'Reason')
+        self.reopen_tree = Treeview(reopen_frame, columns=columns, show='headings', height=15)
+        
+        # Configure column headings
+        for col in columns:
+            self.reopen_tree.heading(col, text=col)
+            self.reopen_tree.column(col, width=120)
+        
+        # Scrollbars
+        reopen_scroll_v = ttk.Scrollbar(reopen_frame, orient=tk.VERTICAL, command=self.reopen_tree.yview)
+        reopen_scroll_h = ttk.Scrollbar(reopen_frame, orient=tk.HORIZONTAL, command=self.reopen_tree.xview)
+        self.reopen_tree.configure(yscrollcommand=reopen_scroll_v.set, xscrollcommand=reopen_scroll_h.set)
+        
+        # Grid layout
+        self.reopen_tree.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        reopen_scroll_v.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        reopen_scroll_h.grid(row=1, column=0, sticky=(tk.W, tk.E))
+        
+        reopen_frame.columnconfigure(0, weight=1)
+        reopen_frame.rowconfigure(0, weight=1)
+    
+    def setup_closed_ok_tab(self):
+        """Setup closed OK tickets tab"""
+        
+        closed_ok_frame = ttk.Frame(self.notebook, padding="10")
+        self.notebook.add(closed_ok_frame, text="Closed OK (0)")
+        
+        # Treeview for closed OK tickets
+        columns = ('Ticket', 'Store', 'Node', 'Resolved', 'Confidence', 'Reason')
+        self.closed_ok_tree = Treeview(closed_ok_frame, columns=columns, show='headings', height=15)
+        
+        # Configure column headings
+        for col in columns:
+            self.closed_ok_tree.heading(col, text=col)
+            self.closed_ok_tree.column(col, width=120)
+        
+        # Scrollbars
+        closed_ok_scroll_v = ttk.Scrollbar(closed_ok_frame, orient=tk.VERTICAL, command=self.closed_ok_tree.yview)
+        closed_ok_scroll_h = ttk.Scrollbar(closed_ok_frame, orient=tk.HORIZONTAL, command=self.closed_ok_tree.xview)
+        self.closed_ok_tree.configure(yscrollcommand=closed_ok_scroll_v.set, xscrollcommand=closed_ok_scroll_h.set)
+        
+        # Grid layout
+        self.closed_ok_tree.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        closed_ok_scroll_v.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        closed_ok_scroll_h.grid(row=1, column=0, sticky=(tk.W, tk.E))
+        
+        closed_ok_frame.columnconfigure(0, weight=1)
+        closed_ok_frame.rowconfigure(0, weight=1)
     
     def setup_errors_tab(self):
         """Setup errors tab"""
@@ -343,9 +405,11 @@ class NodeCrossReferenceGUI:
         # Update status
         can_close = len([r for r in self.results if r.status == "can_close"])
         needs_review = len([r for r in self.results if r.status == "needs_review"])
+        suggest_reopen = len([r for r in self.results if r.status == "suggest_reopen"])
+        closed_ok = len([r for r in self.results if r.status == "closed_ok"])
         errors = len([r for r in self.results if r.status == "error"])
         
-        self.status_var.set(f"Analysis complete: {can_close} can close, {needs_review} need review, {errors} errors")
+        self.status_var.set(f"Analysis complete: {can_close} can close, {needs_review} need review, {suggest_reopen} suggest reopen, {closed_ok} closed OK, {errors} errors")
     
     def _analysis_error(self, error_msg):
         """Called when analysis fails"""
@@ -371,11 +435,15 @@ class NodeCrossReferenceGUI:
         # Clear existing data
         self.can_close_tree.delete(*self.can_close_tree.get_children())
         self.review_tree.delete(*self.review_tree.get_children())
+        self.reopen_tree.delete(*self.reopen_tree.get_children())
+        self.closed_ok_tree.delete(*self.closed_ok_tree.get_children())
         self.errors_tree.delete(*self.errors_tree.get_children())
         
         # Count results by category
         can_close_count = 0
         review_count = 0
+        reopen_count = 0
+        closed_ok_count = 0
         error_count = 0
         
         # Populate tables
@@ -403,6 +471,29 @@ class NodeCrossReferenceGUI:
                 ))
                 review_count += 1
                 
+            elif result.status == "suggest_reopen":
+                self.reopen_tree.insert('', 'end', values=(
+                    ticket.number,
+                    ticket.store_number or "N/A",
+                    ticket.node_number or "N/A",
+                    ticket.resolved or "N/A",
+                    result.confidence,
+                    result.business_logic_flag,
+                    result.reason[:50] + "..." if len(result.reason) > 50 else result.reason
+                ))
+                reopen_count += 1
+                
+            elif result.status == "closed_ok":
+                self.closed_ok_tree.insert('', 'end', values=(
+                    ticket.number,
+                    ticket.store_number or "N/A",
+                    ticket.node_number or "N/A",
+                    ticket.resolved or "N/A",
+                    result.confidence,
+                    result.reason[:50] + "..." if len(result.reason) > 50 else result.reason
+                ))
+                closed_ok_count += 1
+                
             elif result.status == "error":
                 self.errors_tree.insert('', 'end', values=(
                     ticket.number,
@@ -414,8 +505,10 @@ class NodeCrossReferenceGUI:
         # Update tab titles
         tabs = list(self.notebook.tabs())
         self.notebook.tab(tabs[1], text=f"Can Close ({can_close_count})")
-        self.notebook.tab(tabs[2], text=f"Need Review ({review_count})")  
-        self.notebook.tab(tabs[3], text=f"Errors ({error_count})")
+        self.notebook.tab(tabs[2], text=f"Need Review ({review_count})")
+        self.notebook.tab(tabs[3], text=f"Suggest Reopen ({reopen_count})")
+        self.notebook.tab(tabs[4], text=f"Closed OK ({closed_ok_count})")
+        self.notebook.tab(tabs[5], text=f"Errors ({error_count})")
         
         # Update summary
         self.update_summary()
@@ -434,12 +527,16 @@ class NodeCrossReferenceGUI:
         total = len(self.results)
         can_close = len([r for r in self.results if r.status == "can_close"])
         needs_review = len([r for r in self.results if r.status == "needs_review"])
+        suggest_reopen = len([r for r in self.results if r.status == "suggest_reopen"])
+        closed_ok = len([r for r in self.results if r.status == "closed_ok"])
         errors = len([r for r in self.results if r.status == "error"])
         
         summary.append("OVERALL STATISTICS:")
         summary.append(f"Total tickets analyzed: {total}")
         summary.append(f"Can close: {can_close} ({can_close/total*100:.1f}%)")
         summary.append(f"Need review: {needs_review} ({needs_review/total*100:.1f}%)")
+        summary.append(f"Suggest reopen: {suggest_reopen} ({suggest_reopen/total*100:.1f}%)")
+        summary.append(f"Closed OK: {closed_ok} ({closed_ok/total*100:.1f}%)")
         summary.append(f"Errors: {errors} ({errors/total*100:.1f}%)")
         summary.append("")
         
@@ -487,7 +584,11 @@ class NodeCrossReferenceGUI:
             if any(r.status == "can_close" for r in self.results):
                 files_created.append("results_can_close.csv")
             if any(r.status == "needs_review" for r in self.results):
-                files_created.append("results_need_review.csv")  
+                files_created.append("results_need_review.csv")
+            if any(r.status == "suggest_reopen" for r in self.results):
+                files_created.append("results_suggest_reopen.csv")
+            if any(r.status == "closed_ok" for r in self.results):
+                files_created.append("results_closed_ok.csv")
             if any(r.status == "error" for r in self.results):
                 files_created.append("results_errors.csv")
             files_created.append("summary_report.txt")
@@ -521,6 +622,8 @@ class NodeCrossReferenceGUI:
         # Clear UI
         self.can_close_tree.delete(*self.can_close_tree.get_children())
         self.review_tree.delete(*self.review_tree.get_children())
+        self.reopen_tree.delete(*self.reopen_tree.get_children())
+        self.closed_ok_tree.delete(*self.closed_ok_tree.get_children())
         self.errors_tree.delete(*self.errors_tree.get_children())
         self.summary_text.delete(1.0, tk.END)
         
@@ -528,7 +631,9 @@ class NodeCrossReferenceGUI:
         tabs = list(self.notebook.tabs())
         self.notebook.tab(tabs[1], text="Can Close (0)")
         self.notebook.tab(tabs[2], text="Need Review (0)")
-        self.notebook.tab(tabs[3], text="Errors (0)")
+        self.notebook.tab(tabs[3], text="Suggest Reopen (0)")
+        self.notebook.tab(tabs[4], text="Closed OK (0)")
+        self.notebook.tab(tabs[5], text="Errors (0)")
         
         # Reset progress
         self.progress_bar.stop()
