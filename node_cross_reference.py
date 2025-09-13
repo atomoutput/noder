@@ -45,6 +45,7 @@ class Ticket:
     created: str
     updated: str
     resolved: Optional[str] = None
+    assignment_group: Optional[str] = None
     store_number: Optional[int] = None
     node_number: Optional[int] = None
     
@@ -52,6 +53,64 @@ class Ticket:
     def is_closed(self) -> bool:
         """Check if ticket is closed based on resolved field"""
         return self.resolved is not None and self.resolved.strip() != ""
+    
+    @property
+    def created_datetime(self) -> Optional[datetime]:
+        """Parse created date to datetime object"""
+        return self._parse_date(self.created)
+    
+    @property
+    def updated_datetime(self) -> Optional[datetime]:
+        """Parse updated date to datetime object"""
+        return self._parse_date(self.updated)
+    
+    @property
+    def resolved_datetime(self) -> Optional[datetime]:
+        """Parse resolved date to datetime object"""
+        if not self.resolved or not self.resolved.strip():
+            return None
+        return self._parse_date(self.resolved)
+    
+    def _parse_date(self, date_str: str) -> Optional[datetime]:
+        """Parse date string with multiple format support"""
+        if not date_str or not date_str.strip():
+            return None
+            
+        date_str = date_str.strip()
+        
+        # Common date formats found in the CSV
+        formats = [
+            '%d-%b-%Y %H:%M:%S',  # 28-May-2025 13:25:39
+            '%Y-%m-%d %H:%M:%S',  # 2025-05-28 13:25:39
+            '%m/%d/%Y %H:%M:%S',  # 05/28/2025 13:25:39
+            '%d/%m/%Y %H:%M:%S',  # 28/05/2025 13:25:39
+            '%Y-%m-%d',           # 2025-05-28
+            '%d-%b-%Y',           # 28-May-2025
+            '%m/%d/%Y',           # 05/28/2025
+            '%d/%m/%Y',           # 28/05/2025
+        ]
+        
+        for fmt in formats:
+            try:
+                return datetime.strptime(date_str, fmt)
+            except ValueError:
+                continue
+        
+        # If all formats fail, return None
+        print(f"Warning: Could not parse date '{date_str}'")
+        return None
+    
+    def is_reopenable(self, max_days: int = 7) -> bool:
+        """Check if ticket can be reopened (closed within max_days)"""
+        if not self.is_closed:
+            return False  # Already open
+            
+        resolved_dt = self.resolved_datetime
+        if resolved_dt is None:
+            return False  # Can't determine resolved date
+            
+        days_since_closed = (datetime.now() - resolved_dt).days
+        return days_since_closed <= max_days
 
 
 @dataclass
@@ -61,24 +120,74 @@ class OfflineNode:
     node_number: int
     esp_id: str
     last_seen: str
+    
+    @property
+    def last_seen_datetime(self) -> Optional[datetime]:
+        """Parse last seen date to datetime object"""
+        return self._parse_date(self.last_seen)
+    
+    def _parse_date(self, date_str: str) -> Optional[datetime]:
+        """Parse date string with multiple format support"""
+        if not date_str or not date_str.strip():
+            return None
+            
+        date_str = date_str.strip()
+        
+        # Common date formats in node report
+        formats = [
+            '%Y-%m-%d %H:%M:%S',  # 2025-07-12 14:54:14
+            '%d-%b-%Y %H:%M:%S',  # 12-Jul-2025 14:54:14
+            '%m/%d/%Y %H:%M:%S',  # 07/12/2025 14:54:14
+            '%d/%m/%Y %H:%M:%S',  # 12/07/2025 14:54:14
+            '%Y-%m-%d',           # 2025-07-12
+            '%d-%b-%Y',           # 12-Jul-2025
+            '%m/%d/%Y',           # 07/12/2025
+            '%d/%m/%Y',           # 12/07/2025
+        ]
+        
+        for fmt in formats:
+            try:
+                return datetime.strptime(date_str, fmt)
+            except ValueError:
+                continue
+        
+        # If all formats fail, return None
+        print(f"Warning: Could not parse node last seen date '{date_str}'")
+        return None
+    
+    def days_offline(self) -> Optional[int]:
+        """Calculate how many days the node has been offline"""
+        last_seen_dt = self.last_seen_datetime
+        if last_seen_dt is None:
+            return None
+        return (datetime.now() - last_seen_dt).days
+    
+    def is_long_term_offline(self, threshold_days: int = 30) -> bool:
+        """Check if node has been offline for a long time"""
+        days = self.days_offline()
+        return days is not None and days >= threshold_days
 
 
 @dataclass
 class AnalysisResult:
     """Result of analyzing a ticket"""
     ticket: Ticket
-    status: str  # "can_close", "needs_review", "suggest_reopen", "closed_ok", "error"
+    status: str  # "can_close", "needs_review", "suggest_reopen", "closed_ok", "closed_too_old", "error"
     reason: str
     store_in_report: bool = False
     node_in_report: bool = False
     confidence: str = "medium"  # "high", "medium", "low"
     business_logic_flag: str = ""  # Additional flags like "do_not_close", "workflow_status", etc.
+    temporal_analysis: str = ""  # Temporal correlation insights
+    days_offline: Optional[int] = None  # Days the node has been offline
+    reopenable: bool = False  # Whether ticket can be reopened based on age
 
 
 class NodeCrossReference:
     def __init__(self):
         self.tickets: List[Ticket] = []
         self.offline_nodes: Dict[int, Set[int]] = {}  # store_number -> set of offline node numbers
+        self.offline_nodes_detailed: Dict[Tuple[int, int], OfflineNode] = {}  # (store, node) -> OfflineNode
         self.results: List[AnalysisResult] = []
         self.saf_stores: Set[int] = set()  # Stores with SAF markers
         self.both_nodes_offline_stores: Set[int] = set()  # Stores with both nodes offline
@@ -176,6 +285,79 @@ class NodeCrossReference:
         
         return False, ""
     
+    def analyze_temporal_correlation(self, ticket: Ticket) -> Tuple[str, Optional[int], bool]:
+        """Analyze temporal correlation between ticket and node offline status"""
+        temporal_analysis = ""
+        days_offline = None
+        timeline_issue = False
+        
+        if not ticket.store_number or ticket.node_number is None:
+            return temporal_analysis, days_offline, timeline_issue
+            
+        # Get the specific offline node if available
+        node_key = (ticket.store_number, ticket.node_number)
+        offline_node = self.offline_nodes_detailed.get(node_key)
+        
+        if offline_node is None:
+            return temporal_analysis, days_offline, timeline_issue
+            
+        days_offline = offline_node.days_offline()
+        
+        ticket_created = ticket.created_datetime
+        ticket_resolved = ticket.resolved_datetime
+        node_last_seen = offline_node.last_seen_datetime
+        
+        if not all([ticket_created, node_last_seen]):
+            return temporal_analysis, days_offline, timeline_issue
+            
+        # Calculate timeline relationships
+        node_offline_before_ticket = node_last_seen < ticket_created
+        
+        if ticket_resolved and node_last_seen:
+            node_offline_after_resolved = node_last_seen > ticket_resolved
+            
+            if node_offline_after_resolved and ticket.is_closed:
+                temporal_analysis = f"Timeline anomaly: Node went offline AFTER ticket was resolved. Node offline since {offline_node.last_seen}"
+                timeline_issue = True
+            elif node_offline_before_ticket:
+                days_before = (ticket_created - node_last_seen).days
+                temporal_analysis = f"Node was offline {days_before} days before ticket was created"
+            else:
+                temporal_analysis = f"Normal timeline: Node offline before resolution"
+        elif node_offline_before_ticket:
+            days_before = (ticket_created - node_last_seen).days
+            temporal_analysis = f"Node was offline {days_before} days before ticket was created"
+        else:
+            temporal_analysis = f"Node went offline around ticket creation time"
+            
+        return temporal_analysis, days_offline, timeline_issue
+    
+    def get_node_offline_duration(self, store_number: int, node_number: int) -> Optional[int]:
+        """Get days a specific node has been offline"""
+        node_key = (store_number, node_number)
+        offline_node = self.offline_nodes_detailed.get(node_key)
+        if offline_node:
+            return offline_node.days_offline()
+        return None
+    
+    def create_analysis_result(self, ticket: Ticket, status: str, reason: str, 
+                             store_in_report: bool, node_in_report: bool, 
+                             confidence: str, business_flag: str = "",
+                             temporal_analysis: str = "", days_offline: Optional[int] = None) -> AnalysisResult:
+        """Helper method to create AnalysisResult with all temporal fields"""
+        return AnalysisResult(
+            ticket=ticket,
+            status=status,
+            reason=reason,
+            store_in_report=store_in_report,
+            node_in_report=node_in_report,
+            confidence=confidence,
+            business_logic_flag=business_flag,
+            temporal_analysis=temporal_analysis,
+            days_offline=days_offline,
+            reopenable=ticket.is_reopenable() if ticket.is_closed else True
+        )
+    
     def determine_confidence(self, ticket: Ticket, store_in_report: bool, 
                            node_in_report: bool, business_flag: str) -> str:
         """Determine confidence level for the decision"""
@@ -214,12 +396,25 @@ class NodeCrossReference:
                 if missing_columns:
                     raise ValueError(f"Missing required columns in CSV: {', '.join(missing_columns)}")
                 
-                # Check if Resolved column exists
+                # Check for optional columns
                 has_resolved = 'Resolved' in reader.fieldnames
+                has_assignment_group = 'Assignment Group' in reader.fieldnames or 'Assignment group' in reader.fieldnames
+                
+                assignment_group_col = None
+                if 'Assignment Group' in reader.fieldnames:
+                    assignment_group_col = 'Assignment Group'
+                elif 'Assignment group' in reader.fieldnames:
+                    assignment_group_col = 'Assignment group'
+                
                 if has_resolved:
                     print(f"Found 'Resolved' column - will analyze both open and closed tickets")
                 else:
                     print(f"No 'Resolved' column found - treating all tickets as open")
+                    
+                if has_assignment_group:
+                    print(f"Found '{assignment_group_col}' column - will include assignment group analysis")
+                else:
+                    print(f"No 'Assignment Group' column found - skipping assignment group analysis")
                 
                 for row in reader:
                     try:
@@ -230,7 +425,8 @@ class NodeCrossReference:
                             priority=row['Priority'],
                             created=row['Created'],
                             updated=row['Updated'],
-                            resolved=row.get('Resolved', '') if has_resolved else None
+                            resolved=row.get('Resolved', '') if has_resolved else None,
+                            assignment_group=row.get(assignment_group_col, '') if has_assignment_group else None
                         )
                         
                         # Extract store and node numbers
@@ -284,15 +480,33 @@ class NodeCrossReference:
                     if '!!! SAF !!!' in section_content:
                         self.saf_stores.add(store_number)
                     
-                    # Find all nodes in this section
-                    node_matches = re.findall(r'esp\d+-l0([12])', section_content)
+                    # Find all nodes in this section with detailed information
+                    node_pattern = r'NODE\s+(esp\d+-l0([12]))\s+OFFLINE\.\s+Last seen:\s+(.+)'
+                    node_matches = re.findall(node_pattern, section_content)
                     
                     if store_number not in self.offline_nodes:
                         self.offline_nodes[store_number] = set()
                     
-                    for node_match in node_matches:
-                        node_number = int(node_match)
+                    for esp_id, node_num_str, last_seen in node_matches:
+                        node_number = int(node_num_str)
                         self.offline_nodes[store_number].add(node_number)
+                        
+                        # Create detailed OfflineNode object
+                        offline_node = OfflineNode(
+                            store_number=store_number,
+                            node_number=node_number,
+                            esp_id=esp_id,
+                            last_seen=last_seen.strip()
+                        )
+                        
+                        self.offline_nodes_detailed[(store_number, node_number)] = offline_node
+                    
+                    # Fallback: if the above pattern didn't match, try simpler pattern
+                    if not node_matches:
+                        simple_matches = re.findall(r'esp\d+-l0([12])', section_content)
+                        for node_match in simple_matches:
+                            node_number = int(node_match)
+                            self.offline_nodes[store_number].add(node_number)
                     
                     # Check if both nodes are offline
                     if len(self.offline_nodes[store_number]) >= 2:
@@ -364,6 +578,23 @@ class NodeCrossReference:
             ticket.site, ticket.description
         )
         
+        # TEMPORAL INTELLIGENCE: Check if closed ticket is too old to reopen
+        if ticket.is_closed and not ticket.is_reopenable(max_days=7):
+            return AnalysisResult(
+                ticket=ticket,
+                status="closed_too_old",
+                reason=f"Ticket closed more than 7 days ago ({ticket.resolved}) - cannot be reopened",
+                store_in_report=False,
+                node_in_report=False,
+                confidence="high",
+                business_logic_flag=business_flag,
+                temporal_analysis="Ticket beyond reopening window",
+                reopenable=False
+            )
+        
+        # Perform temporal correlation analysis
+        temporal_analysis, days_offline, has_timeline_issue = self.analyze_temporal_correlation(ticket)
+        
         # Check if we could extract store number
         if ticket.store_number is None:
             confidence = self.determine_confidence(ticket, False, False, business_flag)
@@ -374,7 +605,10 @@ class NodeCrossReference:
                 store_in_report=False,
                 node_in_report=False,
                 confidence=confidence,
-                business_logic_flag=business_flag
+                business_logic_flag=business_flag,
+                temporal_analysis=temporal_analysis,
+                days_offline=days_offline,
+                reopenable=ticket.is_reopenable() if ticket.is_closed else True
             )
         
         # Check if store is in the offline report
@@ -394,7 +628,10 @@ class NodeCrossReference:
                 store_in_report=True,
                 node_in_report=True,  # SAF means both nodes are problematic
                 confidence="high",  # High confidence this needs review
-                business_logic_flag="critical_saf"
+                business_logic_flag="critical_saf",
+                temporal_analysis=temporal_analysis,
+                days_offline=days_offline,
+                reopenable=ticket.is_reopenable() if ticket.is_closed else True
             )
         
         # CRITICAL CONDITION: Both nodes offline - NEVER auto-close  
@@ -665,6 +902,7 @@ class NodeCrossReference:
         needs_review = len([r for r in self.results if r.status == "needs_review"])
         suggest_reopen = len([r for r in self.results if r.status == "suggest_reopen"])
         closed_ok = len([r for r in self.results if r.status == "closed_ok"])
+        closed_too_old = len([r for r in self.results if r.status == "closed_too_old"])
         errors = len([r for r in self.results if r.status == "error"])
         
         # Check for missing tickets
@@ -675,6 +913,7 @@ class NodeCrossReference:
         print(f"  Need review: {needs_review}")
         print(f"  Suggest reopen: {suggest_reopen}")
         print(f"  Closed OK: {closed_ok}")
+        print(f"  Closed too old (>7 days): {closed_too_old}")
         print(f"  Errors: {errors}")
         print(f"  Missing tickets: {len(missing_tickets)} (stores with offline nodes but no tickets)")
     
@@ -782,14 +1021,15 @@ class NodeCrossReference:
         # Export to Excel if available
         if EXCEL_AVAILABLE:
             missing_tickets = self.get_missing_tickets()
-            self.export_to_excel(can_close_tickets, needs_review_tickets, suggest_reopen_tickets, closed_ok_tickets, error_tickets, missing_tickets)
+            closed_too_old_tickets = [r for r in self.results if r.status == "closed_too_old"]
+            self.export_to_excel(can_close_tickets, needs_review_tickets, suggest_reopen_tickets, closed_ok_tickets, closed_too_old_tickets, error_tickets, missing_tickets)
         else:
             print("Excel export unavailable - openpyxl not installed. Run: pip install openpyxl")
         
         # Create summary report
         self.create_summary_report()
     
-    def export_to_excel(self, can_close_tickets, needs_review_tickets, suggest_reopen_tickets, closed_ok_tickets, error_tickets, missing_tickets):
+    def export_to_excel(self, can_close_tickets, needs_review_tickets, suggest_reopen_tickets, closed_ok_tickets, closed_too_old_tickets, error_tickets, missing_tickets):
         """Export results to Excel workbook with multiple sheets"""
         try:
             wb = Workbook()
@@ -806,8 +1046,8 @@ class NodeCrossReference:
             
             headers = [
                 'Ticket_Number', 'Site', 'Description', 'Priority', 
-                'Created', 'Updated', 'Resolved', 'Ticket_Status', 'Store_Number', 'Node_Number', 'Confidence', 
-                'Business_Flag', 'Reason'
+                'Created', 'Updated', 'Resolved', 'Assignment_Group', 'Ticket_Status', 'Store_Number', 'Node_Number', 
+                'Days_Offline', 'Reopenable', 'Confidence', 'Business_Flag', 'Temporal_Analysis', 'Reason'
             ]
             
             # Sheet 1: Can Close
@@ -827,8 +1067,8 @@ class NodeCrossReference:
                     t = result.ticket
                     row = [
                         t.number, t.site, t.description, t.priority,
-                        t.created, t.updated, t.resolved or '', 'OPEN' if not t.is_closed else 'CLOSED', t.store_number, t.node_number,
-                        result.confidence, result.business_logic_flag, result.reason
+                        t.created, t.updated, t.resolved or '', t.assignment_group or '', 'OPEN' if not t.is_closed else 'CLOSED', t.store_number, t.node_number,
+                        result.days_offline, 'Yes' if result.reopenable else 'No', result.confidence, result.business_logic_flag, result.temporal_analysis, result.reason
                     ]
                     ws_close.append(row)
                     
