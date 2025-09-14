@@ -34,6 +34,13 @@ try:
 except ImportError:
     EXCEL_AVAILABLE = False
 
+# Import CSV auto-repair functionality
+try:
+    from csv_auto_repair import CSVRepairer, cleanup_temp_file
+    CSV_REPAIR_AVAILABLE = True
+except ImportError:
+    CSV_REPAIR_AVAILABLE = False
+
 
 @dataclass
 class Ticket:
@@ -192,12 +199,31 @@ class NodeCrossReference:
         self.saf_stores: Set[int] = set()  # Stores with SAF markers
         self.both_nodes_offline_stores: Set[int] = set()  # Stores with both nodes offline
         self.stores_with_tickets: Set[int] = set()  # Stores that have tickets
-    
+        self.temp_csv_file: Optional[str] = None  # Track temporary repaired CSV file for cleanup
+
+    def cleanup(self):
+        """Clean up temporary files"""
+        if self.temp_csv_file:
+            cleanup_temp_file(self.temp_csv_file)
+            self.temp_csv_file = None
+
+    def __del__(self):
+        """Destructor to ensure cleanup"""
+        self.cleanup()
+
     def extract_store_number(self, site: str) -> Optional[int]:
-        """Extract store number from site field (e.g., "Wendy's #5198 - Deposit - 8993118")"""
-        match = re.search(r"Wendy's #(\d+)", site, re.IGNORECASE)
+        """Extract store number from site field - handles multiple Wendy's formats"""
+        # Pattern 1: Wendy's #1234 or Wendys #1234 (with or without apostrophe)
+        match = re.search(r"Wendy'?s\s*#(\d+)", site, re.IGNORECASE)
         if match:
             return int(match.group(1))
+
+        # Pattern 2: WENDYS 04999-FZ-SW format (remove leading zeros)
+        match = re.search(r"WENDYS\s+(\d+)(?:-[A-Z0-9-]+)?", site, re.IGNORECASE)
+        if match:
+            store_num_str = match.group(1).lstrip('0') or '0'  # Remove leading zeros, keep at least one digit
+            return int(store_num_str)
+
         return None
     
     def extract_node_number(self, description: str) -> Optional[int]:
@@ -429,9 +455,33 @@ class NodeCrossReference:
         return "medium"
     
     def load_tickets(self, csv_file: str):
-        """Load tickets from CSV file with dynamic column detection"""
+        """Load tickets from CSV file with dynamic column detection and automatic repair"""
+        # Clean up any previous temporary file
+        if self.temp_csv_file:
+            cleanup_temp_file(self.temp_csv_file)
+            self.temp_csv_file = None
+
+        # Attempt automatic CSV repair if available
+        actual_csv_file = csv_file
+        if CSV_REPAIR_AVAILABLE:
+            try:
+                import logging
+                # Create logger for repair operations
+                logger = logging.getLogger('node_cross_reference.csv_repair')
+                repairer = CSVRepairer(logger)
+                actual_csv_file = repairer.auto_repair_csv(csv_file)
+
+                # Track if we're using a temporary repaired file
+                if actual_csv_file != csv_file:
+                    self.temp_csv_file = actual_csv_file
+                    print(f"CSV automatically repaired: {os.path.basename(csv_file)} → using repaired version")
+
+            except Exception as e:
+                print(f"Warning: CSV auto-repair failed, using original file: {e}")
+                actual_csv_file = csv_file
+
         try:
-            with open(csv_file, 'r', encoding='utf-8') as f:
+            with open(actual_csv_file, 'r', encoding='utf-8') as f:
                 reader = csv.DictReader(f)
                 
                 # Validate required columns
@@ -491,10 +541,10 @@ class NodeCrossReference:
             raise FileNotFoundError(f"CSV file '{csv_file}' not found")
         except Exception as e:
             raise Exception(f"Error loading CSV file '{csv_file}': {e}")
-        
+
         open_tickets = len([t for t in self.tickets if not t.is_closed])
         closed_tickets = len([t for t in self.tickets if t.is_closed])
-        print(f"Loaded {len(self.tickets)} tickets from {csv_file} ({open_tickets} open, {closed_tickets} closed)")
+        print(f"Loaded {len(self.tickets)} tickets from {os.path.basename(csv_file)} ({open_tickets} open, {closed_tickets} closed)")
     
     def load_offline_nodes(self, report_file: str):
         """Load offline nodes from the report file"""
@@ -1574,7 +1624,10 @@ def main():
         
         # Export results
         cross_ref.export_results()
-        
+
+        # Clean up temporary files
+        cross_ref.cleanup()
+
         print("\nAnalysis complete! Check the output files for results.")
         
     except Exception as e:

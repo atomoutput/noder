@@ -19,6 +19,13 @@ from typing import List, Optional
 # Import our analysis classes
 from node_cross_reference import NodeCrossReference, AnalysisResult, Ticket
 
+# Import CSV auto-repair functionality
+try:
+    from csv_auto_repair import CSVRepairer, cleanup_temp_file
+    CSV_REPAIR_AVAILABLE = True
+except ImportError:
+    CSV_REPAIR_AVAILABLE = False
+
 
 class NodeCrossReferenceGUI:
     def __init__(self, root):
@@ -31,9 +38,16 @@ class NodeCrossReferenceGUI:
         self.results: List[AnalysisResult] = []
         self.tickets_file = ""
         self.report_file = ""
+        self.temp_csv_file: Optional[str] = None  # Track temporary repaired CSV file
         
         self.setup_ui()
-        
+
+    def cleanup(self):
+        """Clean up temporary files"""
+        if self.temp_csv_file:
+            cleanup_temp_file(self.temp_csv_file)
+            self.temp_csv_file = None
+
     def setup_ui(self):
         """Setup the main user interface"""
         
@@ -300,18 +314,45 @@ class NodeCrossReferenceGUI:
     
     def browse_tickets_file(self):
         """Browse for tickets CSV file"""
-        
+
         filename = filedialog.askopenfilename(
             title="Select Tickets CSV File",
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
             initialdir=os.getcwd()
         )
-        
+
         if filename:
-            self.tickets_file = filename
-            self.tickets_var.set(filename)
+            # Clean up any previous temporary file
+            if self.temp_csv_file:
+                cleanup_temp_file(self.temp_csv_file)
+                self.temp_csv_file = None
+
+            # Try to auto-repair the CSV if available
+            actual_csv_file = filename
+            repair_status = ""
+
+            if CSV_REPAIR_AVAILABLE:
+                try:
+                    import logging
+                    # Create GUI-friendly logger that captures repair info
+                    logger = logging.getLogger('gui_csv_repair')
+                    logger.handlers.clear()  # Clear any existing handlers
+
+                    repairer = CSVRepairer(logger)
+                    actual_csv_file = repairer.auto_repair_csv(filename)
+
+                    # Track if we're using a temporary repaired file
+                    if actual_csv_file != filename:
+                        self.temp_csv_file = actual_csv_file
+                        repair_status = " (auto-repaired)"
+
+                except Exception as e:
+                    repair_status = " (repair failed, using original)"
+
+            self.tickets_file = actual_csv_file
+            self.tickets_var.set(filename)  # Show original filename in UI
             self.update_analysis_button_state()
-            self.status_var.set(f"Selected tickets file: {Path(filename).name}")
+            self.status_var.set(f"Selected tickets file: {Path(filename).name}{repair_status}")
     
     def browse_report_file(self):
         """Browse for report TXT file"""
@@ -387,14 +428,19 @@ class NodeCrossReferenceGUI:
     
     def _analysis_complete(self):
         """Called when analysis is complete"""
-        
+
         # Stop progress animation
         self.progress_bar.stop()
         self.progress_var.set("Analysis complete")
-        
+
+        # Clean up temporary files
+        self.cleanup()
+        if self.cross_ref:
+            self.cross_ref.cleanup()
+
         # Get results
         self.results = self.cross_ref.results
-        
+
         # Update UI
         self.update_results_display()
         
