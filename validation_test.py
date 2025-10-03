@@ -38,7 +38,7 @@ def test_node_language_clarity():
     """Test that node references are now clear and unambiguous"""
     try:
         # Read the summary report to check for clear language
-        with open('summary_report.txt', 'r') as f:
+        with open('summary_report.txt', 'r', encoding='utf-8', newline='') as f:
             content = f.read()
         
         print("\n=== NODE LANGUAGE VALIDATION ===")

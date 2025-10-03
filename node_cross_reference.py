@@ -549,7 +549,7 @@ class NodeCrossReference:
     def load_offline_nodes(self, report_file: str):
         """Load offline nodes from the report file"""
         try:
-            with open(report_file, 'r', encoding='utf-8') as f:
+            with open(report_file, 'r', encoding='utf-8', newline='') as f:
                 content = f.read()
             
             if not content.strip():
@@ -1501,7 +1501,7 @@ class NodeCrossReference:
     
     def create_summary_report(self):
         """Create a detailed summary report"""
-        with open('summary_report.txt', 'w', encoding='utf-8') as f:
+        with open('summary_report.txt', 'w', encoding='utf-8', newline='') as f:
             f.write("NODE CROSS-REFERENCE ANALYSIS SUMMARY\n")
             f.write("=" * 50 + "\n\n")
             f.write(f"Analysis performed on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
@@ -1597,7 +1597,7 @@ def main():
     
     # Check if input files exist
     csv_file = "newnode.csv"  # Using new larger dataset
-    report_file = "data/nodes_report.txt"
+    report_file = os.path.join('data', 'nodes_report.txt')
     
     if not os.path.exists(csv_file):
         print(f"Error: {csv_file} not found in current directory")
