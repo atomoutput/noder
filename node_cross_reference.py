@@ -481,7 +481,7 @@ class NodeCrossReference:
                 actual_csv_file = csv_file
 
         try:
-            with open(actual_csv_file, 'r', encoding='utf-8') as f:
+            with open(actual_csv_file, 'r', encoding='utf-8', newline='') as f:
                 reader = csv.DictReader(f)
                 
                 # Validate required columns
